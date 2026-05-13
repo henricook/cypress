@@ -594,7 +594,7 @@ windows:
   when: *full-workflow-filters
   jobs:
     - node_modules_install:
-        name: windows-node-modules-install
+        name: windows-install-dependencies
         executor: windows
         resource_class: windows.medium
         only-cache-for-root-user: true
@@ -605,7 +605,7 @@ windows:
         executor: windows
         resource_class: windows.large
         requires:
-          - windows-node-modules-install
+          - windows-install-dependencies
 
     - run-app-integration-tests-chrome:
         name: windows-run-app-integration-tests-chrome

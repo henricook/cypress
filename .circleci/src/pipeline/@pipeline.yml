@@ -236,48 +236,49 @@ commands:
       - run: npm --version
 
   restore_cached_workspace:
+    parameters:
+      executor:
+        type: executor
+        default: cy-doc
     steps:
       - attach_workspace:
           at: ~/
       - install-required-node
-      - unpack-dependencies
+      - unless:
+          condition:
+            equal: [ *windows-executor, << parameters.executor >> ]
+          steps:
+            - unpack-dependencies
+
+  windows-install-project-dependencies:
+    description: Yarn install on Windows without circle-cache prepare; tarball cache for ~/.yarn only
+    steps:
+      - run:
+          name: Generate platform key
+          command: node ./scripts/get-platform-key.js > platform_key
+      - restore_cache:
+          name: Restore Yarn tarball cache
+          keys:
+            - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-{{ checksum "platform_key" }}-{{ checksum "yarn.lock" }}
+            - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-{{ checksum "platform_key" }}-
+            - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-
+      - run:
+          name: Install Node Modules (Windows)
+          command: |
+            source ./scripts/ensure-node.sh
+            PERCY_POSTINSTALL_BROWSER=true \
+            yarn --prefer-offline --frozen-lockfile --cache-folder ~/.yarn
+          no_output_timeout: 20m
+      - save_cache:
+          name: Save Yarn tarball cache
+          key: v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-{{ checksum "platform_key" }}-{{ checksum "yarn.lock" }}
+          paths:
+            - ~/.yarn
 
   restore_cached_binary:
     steps:
       - attach_workspace:
           at: ~/
-
-  # Work around the CircleCI Windows save_cache bug that corrupts @-named
-  # packages (https://github.com/cypress-io/cypress/issues/30343):
-  #   1. Reverse patch-package patches in every workspace that has a
-  #      patches/ directory so yarn's integrity check doesn't flag patched
-  #      files as modified.
-  #   2. `yarn install --check-files` re-extracts only genuinely
-  #      missing/corrupt packages.
-  #   3. Re-apply patches explicitly. `yarn install` only re-runs the
-  #      *root* postinstall; workspace postinstalls (where @packages/server
-  #      etc. apply their own patches) are skipped when their packages
-  #      weren't re-extracted, leaving the reversed patches un-reapplied
-  #      in the no-corruption case.
-  # `|| true` on reverse handles cache-corrupted packages that can't be
-  # reversed — step 2 re-extracts them. `|| true` on apply handles the
-  # case where step 2's postinstall already re-applied a patch.
-  # patch-package is idempotent, so re-applying already-applied patches
-  # is a no-op.
-  windows_reinstall_deps:
-    steps:
-      - run:
-          name: reinstall dependencies to work around cache issue (Windows only)
-          command: |
-            for p in patches cli/patches packages/*/patches; do
-              [ -d "$p" ] || continue
-              (cd "$(dirname "$p")" && npx patch-package --reverse) || true
-            done
-            yarn install --check-files
-            for p in patches cli/patches packages/*/patches; do
-              [ -d "$p" ] || continue
-              (cd "$(dirname "$p")" && npx patch-package) || true
-            done
 
   prepare-modules-cache:
     parameters:
@@ -308,6 +309,10 @@ commands:
 
   build-and-persist:
     description: Save entire folder as artifact for other jobs to run without reinstalling
+    parameters:
+      executor:
+        type: executor
+        default: cy-doc
     steps:
       - run:
           name: Build packages
@@ -325,7 +330,11 @@ commands:
             source ./scripts/ensure-node.sh
             # Minification takes some time. We only really need to do that for the binary (and we regenerate snapshots separately there)
             V8_UPDATE_METAFILE=1 V8_SNAPSHOT_DISABLE_MINIFY=1 yarn build-v8-snapshot-prod
-      - prepare-modules-cache # So we don't throw these in the workspace cache
+      - unless:
+          condition:
+            equal: [ *windows-executor, << parameters.executor >> ]
+          steps:
+            - prepare-modules-cache # So we don't throw these in the workspace cache (non-Windows)
       - persist_to_workspace:
           root: ~/
           paths:
@@ -747,11 +756,16 @@ commands:
         description: set to false to skip this job (not relevant to changed files)
         type: boolean
         default: true
+      executor:
+        description: executor in use (for restore_cached_workspace)
+        type: executor
+        default: cy-doc
 
     steps:
       - halt-if-skipped:
           guard: << parameters.guard >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - when:
           condition:
             equal: [ chrome, << parameters.browser >> ]
@@ -883,15 +897,8 @@ commands:
     steps:
       - halt-if-skipped:
           guard: << parameters.guard >>
-      - restore_cached_workspace
-      # this is a temporary work around while we wait for circle to resolve issues with packages
-      # with an @ character in windows during save_cache.
-      # @see https://github.com/cypress-io/cypress/issues/30343 for more details.
-      - when:
-          condition:
-            equal: [ *windows-executor, << parameters.executor >> ]
-          steps:
-            - windows_reinstall_deps
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - install-browsers:
           install-chrome: true
           install-firefox: true
@@ -964,10 +971,15 @@ commands:
         description: set to false to skip this job (not relevant to changed files)
         type: boolean
         default: true
+      executor:
+        description: executor in use (for restore_cached_workspace)
+        type: executor
+        default: cy-doc
     steps:
       - halt-if-skipped:
           guard: << parameters.guard >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - restore_cached_system_tests_deps
       - when:
           condition:
@@ -999,8 +1011,14 @@ commands:
       - sanitize-verify-and-store-mocha-results
 
   run-binary-system-tests:
+    parameters:
+      executor:
+        description: executor in use (for restore_cached_workspace)
+        type: executor
+        default: cy-doc
     steps:
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - restore_cached_system_tests_deps
       - run:
           name: Run system tests
@@ -1630,16 +1648,32 @@ jobs:
       - install-required-node
       - verify-build-setup:
           executor: << parameters.executor >>
-      - persist_to_workspace:
-          root: ~/
-          paths:
-            - cypress
-            - .ssh
-            - .nvm # mac / linux
-            - ProgramData/nvm # windows
-      - caching-dependency-installer:
-          only-cache-for-root-user: <<parameters.only-cache-for-root-user>>
-          build-better-sqlite3: <<parameters.build-better-sqlite3>>
+      - when:
+          condition:
+            not:
+              equal: [ *windows-executor, << parameters.executor >> ]
+          steps:
+            - persist_to_workspace:
+                root: ~/
+                paths:
+                  - cypress
+                  - .ssh
+                  - .nvm # mac / linux
+                  - ProgramData/nvm # windows
+            - caching-dependency-installer:
+                only-cache-for-root-user: <<parameters.only-cache-for-root-user>>
+                build-better-sqlite3: <<parameters.build-better-sqlite3>>
+      - when:
+          condition:
+            equal: [ *windows-executor, << parameters.executor >> ]
+          steps:
+            - windows-install-project-dependencies
+            - persist_to_workspace:
+                root: ~/
+                paths:
+                  - cypress
+                  - .ssh
+                  - ProgramData/nvm # windows
 
   ## restores node_modules from previous step & builds if first step skipped
   build:
@@ -1651,15 +1685,8 @@ jobs:
         default: large
     resource_class: << parameters.resource_class >>
     steps:
-      - restore_cached_workspace
-      # this is a temporary work around while we wait for circle to resolve issues with packages
-      # with an @ character in windows during save_cache.
-      # @see https://github.com/cypress-io/cypress/issues/30343 for more details.
-      - when:
-          condition:
-            equal: [ *windows-executor, << parameters.executor >> ]
-          steps:
-            - windows_reinstall_deps
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Top level packages
           command: yarn list --depth=0 || true
@@ -1668,12 +1695,14 @@ jobs:
           command: |
             IS_CONTRIBUTOR_PR=$([[ "<< pipeline.git.branch >>" =~ ^pull/[0-9]+$ ]] && echo "true" || echo "false")
             node ./scripts/circle-env.js --check-canaries --is-contributor-pr $IS_CONTRIBUTOR_PR
-      - build-and-persist
+      - build-and-persist:
+          executor: << parameters.executor >>
 
   lint:
     <<: *defaults
     steps:
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Linting 🧹
           command: |
@@ -1687,8 +1716,8 @@ jobs:
   check-ts:
     <<: *defaults
     steps:
-      - restore_cached_workspace
-      - install-required-node
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Check TS Types
           command: NODE_OPTIONS=--max_old_space_size=4096 yarn check-ts --concurrency=1
@@ -1696,8 +1725,8 @@ jobs:
   health-check:
     <<: *defaults
     steps:
-      - restore_cached_workspace
-      - install-required-node
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Health Check (Knip)
           command: yarn health-check
@@ -1729,7 +1758,8 @@ jobs:
             - run:
                 name: Skipping job — not relevant to changed files
                 command: circleci-agent step halt
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           # if this is an external pull request, the environment variables
           # are NOT set for security reasons, thus no need to to finalize Percy,
@@ -1808,7 +1838,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-cli-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run: mkdir -p cli/visual-snapshots
       - run:
           command: node cli/bin/cypress info --dev | yarn --silent term-to-html | node
@@ -1841,16 +1872,9 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-v8-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - restore_cached_system_tests_deps
-      # this is a temporary work around while we wait for circle to resolve issues with packages
-      # with an @ character in windows during save_cache.
-      # @see https://github.com/cypress-io/cypress/issues/30343 for more details.
-      - when:
-          condition:
-            equal: [ *windows-executor, << parameters.executor >> ]
-          steps:
-            - windows_reinstall_deps
       # TODO: Remove this once we switch off self-hosted M1 runners
       - when:
           condition:
@@ -1894,15 +1918,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-driver-tests >>
-      - restore_cached_workspace
-      # this is a temporary work around while we wait for circle to resolve issues with packages
-      # with an @ character in windows during save_cache.
-      # @see https://github.com/cypress-io/cypress/issues/30343 for more details.
-      - when:
-          condition:
-            equal: [ *windows-executor, << parameters.executor >> ]
-          steps:
-            - windows_reinstall_deps
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Driver memory tests in Electron
           environment:
@@ -1937,7 +1954,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-unit-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - install-browsers:
           install-chrome: true
           executor: << parameters.executor >>
@@ -1995,7 +2013,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-unit-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - update_known_hosts
       - run: yarn test-npm-package-release-script
       - run: node ./scripts/semantic-commits/validate-binary-changelog.js
@@ -2006,7 +2025,8 @@ jobs:
     <<: *defaults
     parallelism: 1
     steps:
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           command: ls -la types
           working_directory: cli
@@ -2023,7 +2043,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-server-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run: yarn test-unit --scope=@packages/server
       - sanitize-verify-and-store-mocha-results:
           expectedResultCount: 1
@@ -2040,21 +2061,14 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-server-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       # TODO: Remove this once we switch off self-hosted M1 runners
       - when:
           condition:
             equal: [ *darwin-arm64-executor, << parameters.executor >> ]
           steps:
             - run: rm -f /tmp/cypress/junit/*
-      # this is a temporary work around while we wait for circle to resolve issues with packages
-      # with an @ character in windows during save_cache.
-      # @see https://github.com/cypress-io/cypress/issues/30343 for more details.
-      - when:
-          condition:
-            equal: [ *windows-executor, << parameters.executor >> ]
-          steps:
-            - windows_reinstall_deps
       - run: yarn workspace @packages/server test-unit cloud/environment_spec.ts
       - sanitize-verify-and-store-mocha-results:
           expectedResultCount: 1
@@ -2065,7 +2079,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-server-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - install-browsers:
           install-chrome: true
       - run: yarn test-integration --scope=@packages/server
@@ -2077,7 +2092,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-server-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - install-browsers:
           install-chrome: true
           install-firefox: true
@@ -2104,7 +2120,8 @@ jobs:
             - run:
                 name: Skipping job — not relevant to changed files
                 command: circleci-agent step halt
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - update_cached_system_tests_deps
 
   binary-system-tests:
@@ -2120,7 +2137,8 @@ jobs:
     resource_class: medium
     steps:
       - maybe_skip_binary_jobs
-      - run-binary-system-tests
+      - run-binary-system-tests:
+          executor: cy-doc
   yarn-pnp-preprocessor-system-test:
     parallelism: 1
     working_directory: ~/cypress
@@ -2189,6 +2207,7 @@ jobs:
     steps:
       - run-system-tests:
           browser: chrome
+          executor: << parameters.executor >>
           guard: << pipeline.parameters.run-system-tests >>
 
   system-tests-electron:
@@ -2198,6 +2217,7 @@ jobs:
     steps:
       - run-system-tests:
           browser: electron
+          executor: << parameters.executor >>
           guard: << pipeline.parameters.run-system-tests >>
 
   system-tests-firefox:
@@ -2207,6 +2227,7 @@ jobs:
     steps:
       - run-system-tests:
           browser: firefox
+          executor: << parameters.executor >>
           guard: << pipeline.parameters.run-system-tests >>
 
   system-tests-webkit:
@@ -2216,6 +2237,7 @@ jobs:
     steps:
       - run-system-tests:
           browser: webkit
+          executor: << parameters.executor >>
           guard: << pipeline.parameters.run-system-tests >>
 
   system-tests-non-root:
@@ -2223,7 +2245,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-system-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           environment:
             CYPRESS_COMMERCIAL_RECOMMENDATIONS: '0'
@@ -2424,7 +2447,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-reporter-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           command: yarn build-for-tests
           working_directory: packages/reporter
@@ -2447,7 +2471,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-webpack-dev-server-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - restore_cached_system_tests_deps
       - install-browsers:
           install-chrome: true
@@ -2469,7 +2494,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-vite-dev-server-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - restore_cached_system_tests_deps
       - install-browsers:
           install-chrome: true
@@ -2490,7 +2516,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-webpack-preprocessor-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build
           command: yarn lerna run build --scope=@cypress/webpack-preprocessor
@@ -2503,7 +2530,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-webpack-dev-server-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - restore_cached_system_tests_deps
       - run:
           name: Run tests
@@ -2517,7 +2545,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-vite-dev-server-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Run tests
           command: yarn test
@@ -2531,7 +2560,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-webpack-batteries-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Run tests
           command: yarn workspace @cypress/webpack-batteries-included-preprocessor test
@@ -2541,7 +2571,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-vue-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build
           command: yarn lerna run build --scope=@cypress/vue
@@ -2557,7 +2588,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-angular-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build
           command: yarn lerna run build --scope=@cypress/angular
@@ -2567,7 +2599,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-angular-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build
           command: yarn lerna run build --scope @cypress/angular-zoneless
@@ -2577,7 +2610,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-puppeteer-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build
           command: yarn lerna run build --scope=@cypress/puppeteer
@@ -2594,7 +2628,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-puppeteer-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - restore_cached_system_tests_deps
       - install-browsers:
           install-chrome: true
@@ -2608,7 +2643,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-react-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build
           command: yarn lerna run build --scope=@cypress/react
@@ -2624,7 +2660,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-vite-plugin-esm-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build
           command: yarn lerna run build --scope=@cypress/vite-plugin-cypress-esm
@@ -2640,7 +2677,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-mount-utils-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build
           command: yarn lerna run build --scope=@cypress/mount-utils
@@ -2651,7 +2689,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-grep-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run: yarn workspace @cypress/grep and
       - run: yarn workspace @cypress/grep and:not
       - run: yarn workspace @cypress/grep burn
@@ -2687,7 +2726,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-eslint-plugin-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Run tests
           command: yarn workspace @cypress/eslint-plugin-dev test
@@ -2697,7 +2737,8 @@ jobs:
     steps:
       - halt-if-skipped:
           guard: << pipeline.parameters.run-npm-schematic-tests >>
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Build + Install
           command: |
@@ -2712,7 +2753,8 @@ jobs:
     <<: *defaults
     resource_class: medium+
     steps:
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Release packages after all jobs pass
           command: yarn npm-release
@@ -2726,15 +2768,8 @@ jobs:
         default: xlarge
     resource_class: << parameters.resource_class >>
     steps:
-      - restore_cached_workspace
-      # this is a temporary work around while we wait for circle to resolve issues with packages
-      # with an @ character in windows during save_cache.
-      # @see https://github.com/cypress-io/cypress/issues/30343 for more details.
-      - when:
-          condition:
-            equal: [ *windows-executor, << parameters.executor >> ]
-          steps:
-            - windows_reinstall_deps
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - check-if-binary-exists
       - build-and-package-binary
       - build-cypress-npm-package:
@@ -2754,7 +2789,8 @@ jobs:
     resource_class: << parameters.resource_class >>
     steps:
       - maybe_skip_binary_jobs
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - check-if-binary-exists
       - setup_should_persist_artifacts
       - trigger-publish-binary-pipeline:
@@ -2770,7 +2806,8 @@ jobs:
     resource_class: << parameters.resource_class >>
     steps:
       - maybe_skip_binary_jobs
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - run:
           name: Check pipeline info
           command: cat ~/triggered_pipeline.json
@@ -2804,7 +2841,8 @@ jobs:
         default: medium+
     resource_class: << parameters.resource_class >>
     steps:
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - clone-repo-and-checkout-branch:
           repo: cypress-example-kitchensink
       - install-required-node
@@ -2825,7 +2863,8 @@ jobs:
   test-kitchensink-against-staging:
     <<: *defaults
     steps:
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - clone-repo-and-checkout-branch:
           repo: cypress-example-kitchensink
       - install-required-node
@@ -2850,7 +2889,8 @@ jobs:
   test-against-staging:
     <<: *defaults
     steps:
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       - clone-repo-and-checkout-branch:
           repo: cypress-test-tiny
       - run:
@@ -2865,7 +2905,8 @@ jobs:
     <<: *defaults
     resource_class: small
     steps:
-      - restore_cached_workspace
+      - restore_cached_workspace:
+          executor: << parameters.executor >>
       # make sure we have cypress.zip received
       - run: ls -l
       - run: ls -l cypress.zip cypress.tgz
