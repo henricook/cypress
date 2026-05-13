@@ -1,0 +1,21 @@
+machine:
+  image: windows-server-2022-gui:stable
+  shell: bash.exe -eo pipefail
+resource_class: windows.medium
+working_directory: ~/cypress
+environment:
+  PLATFORM: windows
+  TZ: "/usr/share/zoneinfo/America/New_York"
+  COLUMNS: 100
+  LINES: 24
+  CIRCLE_ARTIFACTS: /tmp/artifacts
+parameters:
+  warm_run:
+    description: >-
+      Cold (false): checkout, restore/save ~/.cypress-ci Node+Yarn cache, persist workspace, then
+      yarn tarball install+save. Warm (true): attach_workspace + PATH, then yarn tarball only.
+    type: boolean
+    default: false
+steps:
+  - windows-setup-dependencies-body:
+      warm_run: << parameters.warm_run >>

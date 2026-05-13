@@ -240,40 +240,39 @@ commands:
       executor:
         type: executor
         default: cy-doc
+      windows_skip_git_checkout:
+        description: >-
+          Windows only. When true, expect ~/cypress from attach_workspace (skip git checkout).
+          When false, run checkout before yarn (e.g. windows-build after slim deps workspace).
+        type: boolean
+        default: true
     steps:
       - attach_workspace:
           at: ~/
-      - install-required-node
+      - when:
+          condition:
+            and:
+              - equal: [ *windows-executor, << parameters.executor >> ]
+              - not: << parameters.windows_skip_git_checkout >>
+          steps:
+            - checkout:
+                method: full
+      - unless:
+          condition:
+            equal: [ *windows-executor, << parameters.executor >> ]
+          steps:
+            - install-required-node
+      - when:
+          condition:
+            equal: [ *windows-executor, << parameters.executor >> ]
+          steps:
+            - windows-export-ci-node-yarn-path
+            - windows-yarn-tarball-restore-install
       - unless:
           condition:
             equal: [ *windows-executor, << parameters.executor >> ]
           steps:
             - unpack-dependencies
-
-  windows-install-project-dependencies:
-    description: Yarn install on Windows without circle-cache prepare; tarball cache for ~/.yarn only
-    steps:
-      - run:
-          name: Generate platform key
-          command: node ./scripts/get-platform-key.js > platform_key
-      - restore_cache:
-          name: Restore Yarn tarball cache
-          keys:
-            - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-{{ checksum "platform_key" }}-{{ checksum "yarn.lock" }}
-            - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-{{ checksum "platform_key" }}-
-            - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-
-      - run:
-          name: Install Node Modules (Windows)
-          command: |
-            source ./scripts/ensure-node.sh
-            PERCY_POSTINSTALL_BROWSER=true \
-            yarn --prefer-offline --frozen-lockfile --cache-folder ~/.yarn
-          no_output_timeout: 20m
-      - save_cache:
-          name: Save Yarn tarball cache
-          key: v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-{{ checksum "platform_key" }}-{{ checksum "yarn.lock" }}
-          paths:
-            - ~/.yarn
 
   restore_cached_binary:
     steps:
@@ -317,17 +316,17 @@ commands:
       - run:
           name: Build packages
           command: |
-            source ./scripts/ensure-node.sh
+            if [[ "${PLATFORM:-}" != 'windows' ]]; then source ./scripts/ensure-node.sh; fi
             yarn build
       - run:
           name: Sync Cloud Validations
           command: |
-            source ./scripts/ensure-node.sh
+            if [[ "${PLATFORM:-}" != 'windows' ]]; then source ./scripts/ensure-node.sh; fi
             yarn gulp syncCloudValidations
       - run:
           name: Generate v8 snapshot
           command: |
-            source ./scripts/ensure-node.sh
+            if [[ "${PLATFORM:-}" != 'windows' ]]; then source ./scripts/ensure-node.sh; fi
             # Minification takes some time. We only really need to do that for the binary (and we regenerate snapshots separately there)
             V8_UPDATE_METAFILE=1 V8_SNAPSHOT_DISABLE_MINIFY=1 yarn build-v8-snapshot-prod
       - unless:
@@ -335,6 +334,16 @@ commands:
             equal: [ *windows-executor, << parameters.executor >> ]
           steps:
             - prepare-modules-cache # So we don't throw these in the workspace cache (non-Windows)
+      - when:
+          condition:
+            equal: [ *windows-executor, << parameters.executor >> ]
+          steps:
+            - run:
+                name: Strip node_modules before workspace persist (Windows — deps reinstalled from ~/.yarn cache)
+                command: |
+                  cd ~/cypress
+                  rm -rf node_modules cli/node_modules system-tests/node_modules globbed_node_modules 2>/dev/null || true
+                  find . -name node_modules -type d -prune ! -path "./.git/*" -exec rm -rf {} + 2>/dev/null || true
       - persist_to_workspace:
           root: ~/
           paths:
@@ -1643,6 +1652,15 @@ jobs:
         default: false
     resource_class: << parameters.resource_class >>
     steps:
+      - when:
+          condition:
+            equal: [ *windows-executor, << parameters.executor >> ]
+          steps:
+            - run:
+                name: Use job windows-install-dependencies on Windows
+                command: |
+                  echo 'node_modules_install is not valid for the Windows executor; use job windows-install-dependencies.'
+                  exit 1
       - checkout:
           method: full
       - install-required-node
@@ -1663,17 +1681,6 @@ jobs:
             - caching-dependency-installer:
                 only-cache-for-root-user: <<parameters.only-cache-for-root-user>>
                 build-better-sqlite3: <<parameters.build-better-sqlite3>>
-      - when:
-          condition:
-            equal: [ *windows-executor, << parameters.executor >> ]
-          steps:
-            - windows-install-project-dependencies
-            - persist_to_workspace:
-                root: ~/
-                paths:
-                  - cypress
-                  - .ssh
-                  - ProgramData/nvm # windows
 
   ## restores node_modules from previous step & builds if first step skipped
   build:
@@ -1687,6 +1694,7 @@ jobs:
     steps:
       - restore_cached_workspace:
           executor: << parameters.executor >>
+          windows_skip_git_checkout: false
       - run:
           name: Top level packages
           command: yarn list --depth=0 || true

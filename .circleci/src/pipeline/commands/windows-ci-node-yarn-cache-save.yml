@@ -1,0 +1,10 @@
+steps:
+  - run:
+      name: Refresh platform key for .cypress-ci cache save
+      command: node ./scripts/get-platform-key.js > platform_key_ci_toolchain
+  - save_cache:
+      name: Save Windows .cypress-ci Node and Yarn dirs
+      key: v{{ checksum ".circleci/cache-version.txt" }}-windows-ci-toolchain-{{ checksum "platform_key_ci_toolchain" }}-{{ checksum ".node-version" }}-yarn-1.22.22
+      paths:
+        - ~/.cypress-ci/node
+        - ~/.cypress-ci/yarn

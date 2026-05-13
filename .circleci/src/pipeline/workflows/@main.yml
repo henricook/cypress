@@ -593,11 +593,9 @@ darwin-arm64:
 windows:
   when: *full-workflow-filters
   jobs:
-    - node_modules_install:
+    - windows-install-dependencies:
         name: windows-install-dependencies
-        executor: windows
-        resource_class: windows.medium
-        only-cache-for-root-user: true
+        warm_run: false
 
     - build:
         name: windows-build

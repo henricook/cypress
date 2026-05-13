@@ -1,0 +1,11 @@
+# Restore Circle cache for ~/.cypress-ci/node and ~/.cypress-ci/yarn (Windows toolchain).
+steps:
+  - run:
+      name: Generate platform key for .cypress-ci Node/Yarn cache
+      command: node ./scripts/get-platform-key.js > platform_key_ci_toolchain
+  - restore_cache:
+      name: Restore Windows .cypress-ci Node and Yarn dirs
+      keys:
+        - v{{ checksum ".circleci/cache-version.txt" }}-windows-ci-toolchain-{{ checksum "platform_key_ci_toolchain" }}-{{ checksum ".node-version" }}-yarn-1.22.22
+        - v{{ checksum ".circleci/cache-version.txt" }}-windows-ci-toolchain-{{ checksum "platform_key_ci_toolchain" }}-
+        - v{{ checksum ".circleci/cache-version.txt" }}-windows-ci-toolchain-

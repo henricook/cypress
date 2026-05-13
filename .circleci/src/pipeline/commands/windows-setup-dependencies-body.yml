@@ -1,0 +1,36 @@
+# Windows deps setup: optional cold (checkout + toolchain cache + persist) or warm (attach + PATH),
+# then always Yarn tarball restore/install/save. Toolchain lives in ~/.cypress-ci (outside ~/cypress)
+# so a later checkout in other jobs does not delete Node/Yarn.
+parameters:
+  warm_run:
+    description: >-
+      When false (cold), checkout repo, restore/save ~/.cypress-ci node+yarn cache, persist workspace
+      (cypress + toolchain). When true (warm), attach_workspace only then PATH — expect cypress tree
+      from upstream persist.
+    type: boolean
+    default: false
+steps:
+  - unless:
+      condition: << parameters.warm_run >>
+      steps:
+        - checkout:
+            method: full
+        - windows-ci-node-yarn-cache-restore
+        - windows-install-node-yarn-ci-dirs
+        - windows-ci-node-yarn-cache-save
+        - windows-export-ci-node-yarn-path
+        - persist_to_workspace:
+            root: ~/
+            paths:
+              - cypress
+              - .cypress-ci/node
+              - .cypress-ci/yarn
+              - .ssh
+              - ProgramData/nvm
+  - when:
+      condition: << parameters.warm_run >>
+      steps:
+        - attach_workspace:
+            at: ~/
+        - windows-export-ci-node-yarn-path
+  - windows-yarn-tarball-restore-install-and-save

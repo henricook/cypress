@@ -1,0 +1,12 @@
+# Prepends ~/.cypress-ci/node and Yarn 1.x bin to PATH for subsequent steps (BASH_ENV on Windows bash).
+steps:
+  - run:
+      name: Export PATH for ~/.cypress-ci Node and Yarn
+      command: |
+        echo 'export CYPRESS_CI_TOOLCHAIN="${CYPRESS_CI_TOOLCHAIN:-$HOME/.cypress-ci}"' >> "$BASH_ENV"
+        echo 'export PATH="$HOME/.cypress-ci/node:$HOME/.cypress-ci/yarn/node_modules/.bin:$PATH"' >> "$BASH_ENV"
+        source "$BASH_ENV"
+        command -v node
+        node --version
+        command -v yarn
+        yarn --version

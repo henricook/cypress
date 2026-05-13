@@ -1,0 +1,17 @@
+# Restore ~/.yarn tarball and yarn install only (no save) — Windows consumers after toolchain PATH is set.
+steps:
+  - run:
+      name: Generate platform key for Yarn tarball cache
+      command: node ./scripts/get-platform-key.js > platform_key
+  - restore_cache:
+      name: Restore Yarn tarball cache
+      keys:
+        - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-{{ checksum "platform_key" }}-{{ checksum "yarn.lock" }}
+        - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-{{ checksum "platform_key" }}-
+        - v{{ checksum ".circleci/cache-version.txt" }}-yarn-tarball-
+  - run:
+      name: Yarn install (Windows, ~/.yarn tarball cache)
+      command: |
+        PERCY_POSTINSTALL_BROWSER=true \
+        yarn --prefer-offline --frozen-lockfile --cache-folder ~/.yarn
+      no_output_timeout: 20m
