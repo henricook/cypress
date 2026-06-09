@@ -1,8 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import http from 'http'
-import type { AddressInfo } from 'net'
-import { WebSocketServer } from 'ws'
-import type WebSocket from 'ws'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import CRI from 'chrome-remote-interface'
 
 import { findReadyRunner, RunnerDiscoveryError } from '../../../lib/runner-discovery'
 import type { ReadyRunnerDiscoveryRecord } from '../../../lib/runner-discovery'
@@ -17,133 +14,75 @@ vi.mock('../../../lib/runner-discovery', async (importActual) => {
   }
 })
 
-const HOST = '127.0.0.1'
+// Drive `chrome-remote-interface` at the SDK boundary: the factory and the
+// client it returns are stubbed, so the transport (WebSocket, JSON-RPC,
+// sessionId routing) is the SDK's concern and never exercised here.
+vi.mock('chrome-remote-interface', () => ({ default: vi.fn() }))
+
 const RUNNER_ORIGIN = 'http://localhost:5555'
 const PROJECT = '/projects/app'
+const BROWSER_WS_URL = 'ws://127.0.0.1:9999/devtools/browser/abc-123'
 
-type Closer = () => Promise<void>
+const mockConnect = vi.mocked(CRI as unknown as ReturnType<typeof vi.fn>)
 
-let closers: Closer[] = []
-
-afterEach(async () => {
-  await Promise.all(closers.map((close) => close()))
-  closers = []
-})
-
-/**
- * Per-method scripted replies for the fake page target. A handler returns
- * `{ result }` or `{ error }` (sent back with the request's id), or `undefined`
- * to never reply.
- */
-type CdpHandler = (message: any, socket: WebSocket) => { result?: any, error?: any } | undefined
-
-interface FakeBrowserOptions {
-  handlers?: Record<string, CdpHandler>
-  /** Built once the ws port is known; defaults to a single matching runner page. */
-  targets?: (wsPort: number) => any[]
+const pageTarget = (targetId = 'T1', url = `${RUNNER_ORIGIN}/__/#/specs/runner`) => {
+  return { targetId, type: 'page', url }
 }
 
-const defaultTargets = (wsPort: number) => {
-  return [{
-    id: 'T1',
-    type: 'page',
-    url: `${RUNNER_ORIGIN}/__/#/specs/runner`,
-    webSocketDebuggerUrl: `ws://${HOST}:${wsPort}/devtools/page/T1`,
-  }]
+interface FakeClientOverrides {
+  targetInfos?: any[]
+  evaluate?: ReturnType<typeof vi.fn>
+  callFunctionOn?: ReturnType<typeof vi.fn>
+  getTargets?: ReturnType<typeof vi.fn>
+  attachToTarget?: ReturnType<typeof vi.fn>
 }
 
-/**
- * A fake browser CDP endpoint: an http server for /json/list plus a ws server
- * acting as the runner page target.
- */
-const startFakeBrowser = async (options: FakeBrowserOptions = {}) => {
-  const handlers = options.handlers ?? {}
-  let connections = 0
-
-  const wss = await new Promise<WebSocketServer>((resolve) => {
-    const server = new WebSocketServer({ host: HOST, port: 0 }, () => resolve(server))
-  })
-
-  closers.push(() => {
-    for (const client of wss.clients) {
-      client.terminate()
-    }
-
-    return new Promise((done) => wss.close(() => done()))
-  })
-
-  wss.on('connection', (socket) => {
-    connections += 1
-
-    socket.on('message', (raw) => {
-      const message = JSON.parse(String(raw))
-      const reply = handlers[message.method]?.(message, socket)
-
-      if (reply === undefined) {
-        return
-      }
-
-      socket.send(JSON.stringify({ id: message.id, ...reply }))
-    })
-  })
-
-  const wsPort = (wss.address() as AddressInfo).port
-  const targets = (options.targets ?? defaultTargets)(wsPort)
-
-  const httpServer = await new Promise<http.Server>((resolve) => {
-    const server = http.createServer((req, res) => {
-      res.setHeader('content-type', 'application/json')
-      res.end(JSON.stringify(targets))
-    })
-
-    server.listen(0, HOST, () => resolve(server))
-  })
-
-  closers.push(() => {
-    return new Promise((done) => httpServer.close(() => done()))
-  })
-
-  return {
-    cdpPort: (httpServer.address() as AddressInfo).port,
-    wsPort,
-    getConnections: () => connections,
+// A fake CRI client with healthy defaults: one matching runner page, a flat
+// session, an objectId from evaluate, and a 'ok' from callFunctionOn.
+const makeClient = (overrides: FakeClientOverrides = {}) => {
+  const client = {
+    Target: {
+      getTargets: overrides.getTargets ?? vi.fn().mockResolvedValue({ targetInfos: overrides.targetInfos ?? [pageTarget()] }),
+      attachToTarget: overrides.attachToTarget ?? vi.fn().mockResolvedValue({ sessionId: 'SID1' }),
+    },
+    Runtime: {
+      evaluate: overrides.evaluate ?? vi.fn().mockResolvedValue({ result: { type: 'object', objectId: 'OBJ1' } }),
+      callFunctionOn: overrides.callFunctionOn ?? vi.fn().mockResolvedValue({ result: { type: 'string', value: 'ok' } }),
+    },
+    close: vi.fn().mockResolvedValue(undefined),
   }
+
+  return client
 }
 
 const makeRecord = (overrides: Partial<ReadyRunnerDiscoveryRecord> = {}): ReadyRunnerDiscoveryRecord => {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     pid: 1234,
     cypressVersion: '15.0.0',
     projectRoot: PROJECT,
     runnerOrigin: RUNNER_ORIGIN,
     cdpStatus: 'ready',
-    cdpHost: HOST,
-    cdpPort: 0,
+    cdpHost: '127.0.0.1',
+    cdpPort: 9999,
+    cdpBrowserWsUrl: BROWSER_WS_URL,
     createdAt: 1700000000000,
     ...overrides,
   }
 }
 
-const discoverAt = (cdpPort: number, overrides: Partial<ReadyRunnerDiscoveryRecord> = {}): ReadyRunnerDiscoveryRecord => {
-  const record = makeRecord({ cdpPort, ...overrides })
+// Wire up discovery + a fake browser client for one run. Returns both so tests
+// can assert against the record and the client's stubbed methods.
+const discover = (client = makeClient(), overrides: Partial<ReadyRunnerDiscoveryRecord> = {}) => {
+  const record = makeRecord(overrides)
 
   vi.mocked(findReadyRunner).mockResolvedValue(record)
+  mockConnect.mockResolvedValue(client)
 
-  return record
+  return { record, client }
 }
 
-// Scripted binding replies: a healthy evaluate handing out objectIds, and a
-// healthy getHealth call.
-const evaluateOk = (objectId = 'OBJ1'): CdpHandler => {
-  return () => ({ result: { result: { type: 'object', objectId } } })
-}
-
-const callOk = (value: any = 'ok'): CdpHandler => {
-  return () => ({ result: { result: { type: 'string', value } } })
-}
-
-const staleObjectError = { error: { code: -32000, message: 'Could not find object with given id' } }
+const staleError = () => new Error('Could not find object with given id')
 
 const expectCode = async (promise: Promise<any>, code: string) => {
   const err = await promise.catch((e) => e)
@@ -157,113 +96,89 @@ const expectCode = async (promise: Promise<any>, code: string) => {
 describe('lib/tap/run-tap-command', () => {
   beforeEach(() => {
     vi.mocked(findReadyRunner).mockReset()
+    mockConnect.mockReset()
   })
 
-  it('discovers, attaches, invokes the binding method, and hands the result to handle', async () => {
-    const evaluate = vi.fn(evaluateOk())
-    const callFunctionOn = vi.fn(callOk())
-    const { cdpPort } = await startFakeBrowser({
-      handlers: { 'Runtime.evaluate': evaluate, 'Runtime.callFunctionOn': callFunctionOn },
-    })
-    const record = discoverAt(cdpPort)
-
+  it('discovers, connects to the browser ws, attaches a session, invokes the binding, and hands the result to handle', async () => {
+    const { record, client } = discover()
     const handle = vi.fn()
 
     await runTapCommand({ projectRoot: PROJECT, instance: 1234 }, 'getHealth', [], handle)
 
     expect(findReadyRunner).toHaveBeenCalledWith(PROJECT, { instance: 1234 })
+    // Connected straight to the stored browser ws URL — no HTTP discovery.
+    expect(mockConnect).toHaveBeenCalledWith({ target: BROWSER_WS_URL })
     expect(handle).toHaveBeenCalledWith('ok', { record })
 
-    expect(evaluate).toHaveBeenCalledOnce()
-    expect(evaluate.mock.calls[0][0].params).toEqual({ expression: 'window.__CYPRESS_TAP_BINDING__' })
+    expect(client.Runtime.evaluate).toHaveBeenCalledOnce()
+    expect(client.Runtime.evaluate.mock.calls[0][0]).toEqual({ expression: 'window.__CYPRESS_TAP_BINDING__' })
+    expect(client.Runtime.evaluate.mock.calls[0][1]).toBe('SID1')
 
-    expect(callFunctionOn).toHaveBeenCalledOnce()
-    expect(callFunctionOn.mock.calls[0][0].params).toEqual({
+    expect(client.Target.attachToTarget).toHaveBeenCalledWith({ targetId: 'T1', flatten: true })
+
+    expect(client.Runtime.callFunctionOn).toHaveBeenCalledOnce()
+    expect(client.Runtime.callFunctionOn.mock.calls[0][0]).toEqual({
       objectId: 'OBJ1',
       functionDeclaration: 'function (...a) { return this.getHealth(...a) }',
       arguments: [],
       returnByValue: true,
       awaitPromise: true,
     })
+
+    expect(client.Runtime.callFunctionOn.mock.calls[0][1]).toBe('SID1')
+
+    // Always closes the connection.
+    expect(client.close).toHaveBeenCalledOnce()
   })
 
   it('re-acquires the binding and retries once on a stale handle', async () => {
-    let evaluations = 0
-    const evaluate = vi.fn((() => {
-      evaluations += 1
+    const evaluate = vi.fn()
+    .mockResolvedValueOnce({ result: { type: 'object', objectId: 'OBJ1' } })
+    .mockResolvedValueOnce({ result: { type: 'object', objectId: 'OBJ2' } })
 
-      return { result: { result: { type: 'object', objectId: `OBJ${evaluations}` } } }
-    }) as CdpHandler)
+    const callFunctionOn = vi.fn()
+    .mockRejectedValueOnce(staleError())
+    .mockResolvedValueOnce({ result: { type: 'string', value: 'ok' } })
 
-    const callFunctionOn = vi.fn(((message) => {
-      if (message.params.objectId === 'OBJ1') {
-        return staleObjectError
-      }
-
-      return { result: { result: { type: 'string', value: 'ok' } } }
-    }) as CdpHandler)
-
-    const { cdpPort } = await startFakeBrowser({
-      handlers: { 'Runtime.evaluate': evaluate, 'Runtime.callFunctionOn': callFunctionOn },
-    })
-
-    discoverAt(cdpPort)
-
+    const { client } = discover(makeClient({ evaluate, callFunctionOn }))
     const handle = vi.fn()
 
     await runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], handle)
 
     expect(handle).toHaveBeenCalledWith('ok', expect.anything())
-    expect(evaluate).toHaveBeenCalledTimes(2)
-    expect(callFunctionOn).toHaveBeenCalledTimes(2)
-    expect(callFunctionOn.mock.calls[1][0].params.objectId).toBe('OBJ2')
+    expect(client.Runtime.evaluate).toHaveBeenCalledTimes(2)
+    expect(client.Runtime.callFunctionOn).toHaveBeenCalledTimes(2)
+    expect(client.Runtime.callFunctionOn.mock.calls[1][0].objectId).toBe('OBJ2')
   })
 
   it('throws STALE_HANDLE when the handle is still stale after one retry', async () => {
-    const evaluate = vi.fn(evaluateOk())
-    const callFunctionOn = vi.fn((() => staleObjectError) as CdpHandler)
-    const { cdpPort } = await startFakeBrowser({
-      handlers: { 'Runtime.evaluate': evaluate, 'Runtime.callFunctionOn': callFunctionOn },
-    })
+    const evaluate = vi.fn().mockResolvedValue({ result: { type: 'object', objectId: 'OBJ1' } })
+    const callFunctionOn = vi.fn().mockRejectedValue(staleError())
 
-    discoverAt(cdpPort)
+    const { client } = discover(makeClient({ evaluate, callFunctionOn }))
 
     await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'STALE_HANDLE')
 
     // exactly one re-acquire — no unbounded retry loops
-    expect(evaluate).toHaveBeenCalledTimes(2)
-    expect(callFunctionOn).toHaveBeenCalledTimes(2)
+    expect(client.Runtime.evaluate).toHaveBeenCalledTimes(2)
+    expect(client.Runtime.callFunctionOn).toHaveBeenCalledTimes(2)
   })
 
   it('throws BINDING_NOT_FOUND when the binding is not mounted', async () => {
-    const callFunctionOn = vi.fn(callOk())
-    const { cdpPort } = await startFakeBrowser({
-      handlers: {
-        'Runtime.evaluate': () => ({ result: { result: { type: 'undefined' } } }),
-        'Runtime.callFunctionOn': callFunctionOn,
-      },
-    })
-
-    discoverAt(cdpPort)
+    const evaluate = vi.fn().mockResolvedValue({ result: { type: 'undefined' } })
+    const { client } = discover(makeClient({ evaluate }))
 
     await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'BINDING_NOT_FOUND')
-    expect(callFunctionOn).not.toHaveBeenCalled()
+    expect(client.Runtime.callFunctionOn).not.toHaveBeenCalled()
   })
 
   it('throws BINDING_THREW when the binding method throws', async () => {
-    const { cdpPort } = await startFakeBrowser({
-      handlers: {
-        'Runtime.evaluate': evaluateOk(),
-        'Runtime.callFunctionOn': () => ({
-          result: {
-            result: { type: 'object', subtype: 'error' },
-            exceptionDetails: { text: 'Uncaught (in promise)', exception: { type: 'object', description: 'Error: boom' } },
-          },
-        }),
-      },
+    const callFunctionOn = vi.fn().mockResolvedValue({
+      result: { type: 'object', subtype: 'error' },
+      exceptionDetails: { text: 'Uncaught (in promise)', exception: { type: 'object', description: 'Error: boom' } },
     })
 
-    discoverAt(cdpPort)
+    discover(makeClient({ callFunctionOn }))
 
     const err = await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'BINDING_THREW')
 
@@ -271,73 +186,52 @@ describe('lib/tap/run-tap-command', () => {
   })
 
   it('throws RUNNER_PAGE_NOT_FOUND when no page target matches the runner origin', async () => {
-    const { cdpPort, getConnections } = await startFakeBrowser({
-      targets: (wsPort: number) => {
-        return [
-          // wrong origin
-          { id: 'T1', type: 'page', url: 'http://localhost:7777/other', webSocketDebuggerUrl: `ws://${HOST}:${wsPort}/devtools/page/T1` },
-          // right origin, but not a page
-          { id: 'T2', type: 'service_worker', url: `${RUNNER_ORIGIN}/sw.js`, webSocketDebuggerUrl: `ws://${HOST}:${wsPort}/devtools/page/T2` },
-        ]
-      },
+    const client = makeClient({
+      targetInfos: [
+        // right origin, wrong type
+        { targetId: 'T1', type: 'service_worker', url: `${RUNNER_ORIGIN}/sw.js` },
+        // page, wrong origin
+        { targetId: 'T2', type: 'page', url: 'http://localhost:7777/other' },
+      ],
     })
 
-    discoverAt(cdpPort)
+    discover(client)
 
     await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'RUNNER_PAGE_NOT_FOUND')
-    expect(getConnections()).toBe(0)
+    expect(client.Target.attachToTarget).not.toHaveBeenCalled()
   })
 
-  it('throws CDP_UNREACHABLE when the debugging endpoint is unreachable', async () => {
-    // Grab a port with nothing listening on it.
-    const server = await new Promise<http.Server>((resolve) => {
-      const listening = http.createServer()
-
-      listening.listen(0, HOST, () => resolve(listening))
-    })
-    const deadPort = (server.address() as AddressInfo).port
-
-    await new Promise((done) => server.close(() => done(null)))
-
-    discoverAt(deadPort)
+  it('throws CDP_UNREACHABLE when the browser connection cannot be opened', async () => {
+    vi.mocked(findReadyRunner).mockResolvedValue(makeRecord())
+    mockConnect.mockRejectedValue(new Error('connect ECONNREFUSED'))
 
     await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'CDP_UNREACHABLE')
   })
 
-  it('throws CDP_UNREACHABLE when the page target websocket is dead', async () => {
-    const { cdpPort, wsPort } = await startFakeBrowser({
-      targets: () => {
-        return [{
-          id: 'T1',
-          type: 'page',
-          url: `${RUNNER_ORIGIN}/__/`,
-          // a port in the dynamic range that nothing in this suite listens on
-          webSocketDebuggerUrl: `ws://${HOST}:1/devtools/page/T1`,
-        }]
-      },
-    })
+  it('throws CDP_UNREACHABLE when listing targets fails', async () => {
+    const getTargets = vi.fn().mockRejectedValue(new Error('socket hung up'))
 
-    expect(wsPort).toBeGreaterThan(0)
-    discoverAt(cdpPort)
+    discover(makeClient({ getTargets }))
 
     await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'CDP_UNREACHABLE')
   })
 
-  it('throws CDP_UNREACHABLE when the socket dies mid-call', async () => {
-    const { cdpPort } = await startFakeBrowser({
-      handlers: {
-        'Runtime.evaluate': evaluateOk(),
-        'Runtime.callFunctionOn': (message, socket) => {
-          socket.terminate()
+  it('throws CDP_UNREACHABLE when attaching to the runner page fails', async () => {
+    const attachToTarget = vi.fn().mockRejectedValue(new Error('No target with given id found'))
 
-          return undefined
-        },
-      },
-    })
-
-    discoverAt(cdpPort)
+    discover(makeClient({ attachToTarget }))
 
     await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'CDP_UNREACHABLE')
+  })
+
+  it('throws CDP_UNREACHABLE when the binding call fails with a non-stale error', async () => {
+    const callFunctionOn = vi.fn().mockRejectedValue(new Error('socket hung up'))
+    const { client } = discover(makeClient({ callFunctionOn }))
+
+    await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'CDP_UNREACHABLE')
+
+    // a non-stale error is not retried
+    expect(client.Runtime.callFunctionOn).toHaveBeenCalledOnce()
   })
 
   it('rethrows discovery errors untouched', async () => {
@@ -350,49 +244,22 @@ describe('lib/tap/run-tap-command', () => {
     expect(err).toBe(discoveryErr)
     expect(err).toBeInstanceOf(RunnerDiscoveryError)
     expect(err.code).toBe('NO_DISCOVERY_FILE')
+    // never reached the transport
+    expect(mockConnect).not.toHaveBeenCalled()
   })
 
-  it('connects via the record cdpHost when the advertised websocket host is unconnectable', async () => {
-    const { cdpPort } = await startFakeBrowser({
-      handlers: { 'Runtime.evaluate': evaluateOk(), 'Runtime.callFunctionOn': callOk() },
-      targets: (wsPort: number) => {
-        return [{
-          id: 'T1',
-          type: 'page',
-          url: `${RUNNER_ORIGIN}/__/`,
-          // Chrome can advertise its bind address — not connectable as-is
-          webSocketDebuggerUrl: `ws://0.0.0.0:${wsPort}/devtools/page/T1`,
-        }]
-      },
+  it('attaches to the first page target when multiple match the runner origin', async () => {
+    const client = makeClient({
+      targetInfos: [pageTarget('T1'), pageTarget('T2')],
     })
 
-    discoverAt(cdpPort)
+    discover(client)
 
     const handle = vi.fn()
 
     await runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], handle)
 
     expect(handle).toHaveBeenCalledWith('ok', expect.anything())
-  })
-
-  it('uses the first page target when multiple match the runner origin', async () => {
-    const { cdpPort } = await startFakeBrowser({
-      handlers: { 'Runtime.evaluate': evaluateOk(), 'Runtime.callFunctionOn': callOk() },
-      targets: (wsPort: number) => {
-        return [
-          { id: 'T1', type: 'page', url: `${RUNNER_ORIGIN}/__/`, webSocketDebuggerUrl: `ws://${HOST}:${wsPort}/devtools/page/T1` },
-          // picking this one would fail: nothing listens there
-          { id: 'T2', type: 'page', url: `${RUNNER_ORIGIN}/__/`, webSocketDebuggerUrl: `ws://${HOST}:1/devtools/page/T2` },
-        ]
-      },
-    })
-
-    discoverAt(cdpPort)
-
-    const handle = vi.fn()
-
-    await runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], handle)
-
-    expect(handle).toHaveBeenCalledWith('ok', expect.anything())
+    expect(client.Target.attachToTarget).toHaveBeenCalledWith({ targetId: 'T1', flatten: true })
   })
 })
