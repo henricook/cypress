@@ -565,37 +565,6 @@ exports[`cli > unknown option > shows help for run command 1`] = `
   "
 `;
 
-exports[`cli > unknown option > shows help for tap command - no sub-command 1`] = `
-"
-  command: bin/cypress tap
-  code: 1
-  failed: true
-  killed: false
-  signal: null
-  timedOut: false
-
-  stdout:
-  -------
-  Usage: cypress tap [command]
-
-  Interacts with a running Cypress instance
-
-  Options:
-    health                        check that a running Cypress instance is
-                                  reachable and its tap binding responds
-    -P, --project <project-path>  path to the project
-    --instance <pid>              target a specific running Cypress instance by
-                                  its server process id (pid)
-    --json                        print the result as a single JSON object
-    -h, --help                    display help for command
-  -------
-  stderr:
-  -------
-  
-  -------
-  "
-`;
-
 exports[`cli > unknown option > shows help for tap command - unknown option --foo 1`] = `
 "
   command: bin/cypress tap --foo
@@ -614,41 +583,6 @@ exports[`cli > unknown option > shows help for tap command - unknown option --fo
   Interacts with a running Cypress instance
 
   Options:
-    health                        check that a running Cypress instance is
-                                  reachable and its tap binding responds
-    -P, --project <project-path>  path to the project
-    --instance <pid>              target a specific running Cypress instance by
-                                  its server process id (pid)
-    --json                        print the result as a single JSON object
-    -h, --help                    display help for command
-  -------
-  stderr:
-  -------
-  
-  -------
-  "
-`;
-
-exports[`cli > unknown option > shows help for tap command - unknown sub-command foo 1`] = `
-"
-  command: bin/cypress tap foo
-  code: 1
-  failed: true
-  killed: false
-  signal: null
-  timedOut: false
-
-  stdout:
-  -------
-  error: unknown command: tap foo
-
-  Usage: cypress tap [command]
-
-  Interacts with a running Cypress instance
-
-  Options:
-    health                        check that a running Cypress instance is
-                                  reachable and its tap binding responds
     -P, --project <project-path>  path to the project
     --instance <pid>              target a specific running Cypress instance by
                                   its server process id (pid)

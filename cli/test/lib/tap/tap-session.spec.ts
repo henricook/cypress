@@ -3,7 +3,7 @@ import CRI from 'chrome-remote-interface'
 
 import { findReadyRunner, RunnerDiscoveryError } from '../../../lib/runner-discovery'
 import type { ReadyRunnerDiscoveryRecord } from '../../../lib/runner-discovery'
-import { runTapCommand, TapTransportError } from '../../../lib/tap/run-tap-command'
+import { withTapSession, TapTransportError } from '../../../lib/tap/tap-session'
 
 vi.mock('../../../lib/runner-discovery', async (importActual) => {
   const actual = await importActual<typeof import('../../../lib/runner-discovery')>()
@@ -82,6 +82,11 @@ const discover = (client = makeClient(), overrides: Partial<ReadyRunnerDiscovery
   return { record, client }
 }
 
+// The single-call shape most tests need: one session, one binding invocation.
+const callOnce = (method = 'health', args: unknown[] = []) => {
+  return withTapSession({ projectRoot: PROJECT }, (session) => session.call(method, args))
+}
+
 const staleError = () => new Error('Could not find object with given id')
 
 const expectCode = async (promise: Promise<any>, code: string) => {
@@ -93,22 +98,25 @@ const expectCode = async (promise: Promise<any>, code: string) => {
   return err
 }
 
-describe('lib/tap/run-tap-command', () => {
+describe('lib/tap/tap-session', () => {
   beforeEach(() => {
     vi.mocked(findReadyRunner).mockReset()
     mockConnect.mockReset()
   })
 
-  it('discovers, connects to the browser ws, attaches a session, invokes the binding, and hands the result to handle', async () => {
+  it('discovers, connects to the browser ws, attaches a session, invokes the binding, and returns the decoded result', async () => {
     const { record, client } = discover()
-    const handle = vi.fn()
 
-    await runTapCommand({ projectRoot: PROJECT, instance: 1234 }, 'getHealth', [], handle)
+    const result = await withTapSession({ projectRoot: PROJECT, instance: 1234 }, async (session) => {
+      expect(session.record).toBe(record)
 
+      return session.call('health')
+    })
+
+    expect(result).toBe('ok')
     expect(findReadyRunner).toHaveBeenCalledWith(PROJECT, { instance: 1234 })
     // Connected straight to the stored browser ws URL — no HTTP discovery.
     expect(mockConnect).toHaveBeenCalledWith({ target: BROWSER_WS_URL })
-    expect(handle).toHaveBeenCalledWith('ok', { record })
 
     expect(client.Runtime.evaluate).toHaveBeenCalledOnce()
     expect(client.Runtime.evaluate.mock.calls[0][0]).toEqual({ expression: 'window.__CYPRESS_TAP_BINDING__' })
@@ -119,7 +127,7 @@ describe('lib/tap/run-tap-command', () => {
     expect(client.Runtime.callFunctionOn).toHaveBeenCalledOnce()
     expect(client.Runtime.callFunctionOn.mock.calls[0][0]).toEqual({
       objectId: 'OBJ1',
-      functionDeclaration: 'function (...a) { return this.getHealth(...a) }',
+      functionDeclaration: 'function (...a) { return this.health(...a) }',
       arguments: [],
       returnByValue: true,
       awaitPromise: true,
@@ -128,6 +136,53 @@ describe('lib/tap/run-tap-command', () => {
     expect(client.Runtime.callFunctionOn.mock.calls[0][1]).toBe('SID1')
 
     // Always closes the connection.
+    expect(client.close).toHaveBeenCalledOnce()
+  })
+
+  it('serves multiple calls over one connection (the getSchema handshake + the command)', async () => {
+    const callFunctionOn = vi.fn()
+    .mockResolvedValueOnce({ result: { type: 'object', value: { protocolVersion: 1, commands: [] } } })
+    .mockResolvedValueOnce({ result: { type: 'string', value: 'ok' } })
+
+    const { client } = discover(makeClient({ callFunctionOn }))
+
+    const results = await withTapSession({ projectRoot: PROJECT }, async (session) => {
+      return [await session.call('getSchema'), await session.call('health')]
+    })
+
+    expect(results).toEqual([{ protocolVersion: 1, commands: [] }, 'ok'])
+
+    // One discovery, one connection, one page attach — calls share the session.
+    expect(findReadyRunner).toHaveBeenCalledOnce()
+    expect(mockConnect).toHaveBeenCalledOnce()
+    expect(client.Target.attachToTarget).toHaveBeenCalledOnce()
+
+    expect(client.Runtime.callFunctionOn.mock.calls[0][0].functionDeclaration).toContain('this.getSchema')
+    expect(client.Runtime.callFunctionOn.mock.calls[1][0].functionDeclaration).toContain('this.health')
+
+    expect(client.close).toHaveBeenCalledOnce()
+  })
+
+  it('rejects method names that are not plain identifiers before any CDP call', async () => {
+    const { client } = discover()
+
+    await expectCode(callOnce('health(); window.x'), 'INVALID_METHOD')
+    await expectCode(callOnce('a.b'), 'INVALID_METHOD')
+    await expectCode(callOnce(''), 'INVALID_METHOD')
+
+    // The trampoline template was never built from hostile input.
+    expect(client.Runtime.callFunctionOn).not.toHaveBeenCalled()
+  })
+
+  it('closes the connection even when fn itself throws', async () => {
+    const { client } = discover()
+    const boom = new Error('boom')
+
+    const err = await withTapSession({ projectRoot: PROJECT }, async () => {
+      throw boom
+    }).catch((e) => e)
+
+    expect(err).toBe(boom)
     expect(client.close).toHaveBeenCalledOnce()
   })
 
@@ -141,11 +196,8 @@ describe('lib/tap/run-tap-command', () => {
     .mockResolvedValueOnce({ result: { type: 'string', value: 'ok' } })
 
     const { client } = discover(makeClient({ evaluate, callFunctionOn }))
-    const handle = vi.fn()
 
-    await runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], handle)
-
-    expect(handle).toHaveBeenCalledWith('ok', expect.anything())
+    expect(await callOnce()).toBe('ok')
     expect(client.Runtime.evaluate).toHaveBeenCalledTimes(2)
     expect(client.Runtime.callFunctionOn).toHaveBeenCalledTimes(2)
     expect(client.Runtime.callFunctionOn.mock.calls[1][0].objectId).toBe('OBJ2')
@@ -157,7 +209,7 @@ describe('lib/tap/run-tap-command', () => {
 
     const { client } = discover(makeClient({ evaluate, callFunctionOn }))
 
-    await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'STALE_HANDLE')
+    await expectCode(callOnce(), 'STALE_HANDLE')
 
     // exactly one re-acquire — no unbounded retry loops
     expect(client.Runtime.evaluate).toHaveBeenCalledTimes(2)
@@ -168,7 +220,7 @@ describe('lib/tap/run-tap-command', () => {
     const evaluate = vi.fn().mockResolvedValue({ result: { type: 'undefined' } })
     const { client } = discover(makeClient({ evaluate }))
 
-    await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'BINDING_NOT_FOUND')
+    await expectCode(callOnce(), 'BINDING_NOT_FOUND')
     expect(client.Runtime.callFunctionOn).not.toHaveBeenCalled()
   })
 
@@ -180,7 +232,7 @@ describe('lib/tap/run-tap-command', () => {
 
     discover(makeClient({ callFunctionOn }))
 
-    const err = await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'BINDING_THREW')
+    const err = await expectCode(callOnce(), 'BINDING_THREW')
 
     expect(err.message).toContain('Error: boom')
   })
@@ -197,7 +249,7 @@ describe('lib/tap/run-tap-command', () => {
 
     discover(client)
 
-    await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'RUNNER_PAGE_NOT_FOUND')
+    await expectCode(callOnce(), 'RUNNER_PAGE_NOT_FOUND')
     expect(client.Target.attachToTarget).not.toHaveBeenCalled()
   })
 
@@ -205,7 +257,7 @@ describe('lib/tap/run-tap-command', () => {
     vi.mocked(findReadyRunner).mockResolvedValue(makeRecord())
     mockConnect.mockRejectedValue(new Error('connect ECONNREFUSED'))
 
-    await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'CDP_UNREACHABLE')
+    await expectCode(callOnce(), 'CDP_UNREACHABLE')
   })
 
   it('throws CDP_UNREACHABLE when listing targets fails', async () => {
@@ -213,7 +265,7 @@ describe('lib/tap/run-tap-command', () => {
 
     discover(makeClient({ getTargets }))
 
-    await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'CDP_UNREACHABLE')
+    await expectCode(callOnce(), 'CDP_UNREACHABLE')
   })
 
   it('throws CDP_UNREACHABLE when attaching to the runner page fails', async () => {
@@ -221,14 +273,14 @@ describe('lib/tap/run-tap-command', () => {
 
     discover(makeClient({ attachToTarget }))
 
-    await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'CDP_UNREACHABLE')
+    await expectCode(callOnce(), 'CDP_UNREACHABLE')
   })
 
   it('throws CDP_UNREACHABLE when the binding call fails with a non-stale error', async () => {
     const callFunctionOn = vi.fn().mockRejectedValue(new Error('socket hung up'))
     const { client } = discover(makeClient({ callFunctionOn }))
 
-    await expectCode(runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()), 'CDP_UNREACHABLE')
+    await expectCode(callOnce(), 'CDP_UNREACHABLE')
 
     // a non-stale error is not retried
     expect(client.Runtime.callFunctionOn).toHaveBeenCalledOnce()
@@ -239,7 +291,7 @@ describe('lib/tap/run-tap-command', () => {
 
     vi.mocked(findReadyRunner).mockRejectedValue(discoveryErr)
 
-    const err = await runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], vi.fn()).catch((e) => e)
+    const err = await callOnce().catch((e) => e)
 
     expect(err).toBe(discoveryErr)
     expect(err).toBeInstanceOf(RunnerDiscoveryError)
@@ -255,11 +307,7 @@ describe('lib/tap/run-tap-command', () => {
 
     discover(client)
 
-    const handle = vi.fn()
-
-    await runTapCommand({ projectRoot: PROJECT }, 'getHealth', [], handle)
-
-    expect(handle).toHaveBeenCalledWith('ok', expect.anything())
+    expect(await callOnce()).toBe('ok')
     expect(client.Target.attachToTarget).toHaveBeenCalledWith({ targetId: 'T1', flatten: true })
   })
 })

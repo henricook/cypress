@@ -4,7 +4,6 @@ import CRI from 'chrome-remote-interface'
 import { findReadyRunner } from '../runner-discovery'
 import type { FindRunnerOptions, ReadyRunnerDiscoveryRecord } from '../runner-discovery'
 import { TAP_BINDING_GLOBAL } from './contract'
-import type { TapBindingContract } from './contract'
 
 const debug = Debug('cypress:cli:tap')
 
@@ -14,11 +13,15 @@ export type TapTransportErrorCode =
   | 'BINDING_NOT_FOUND'
   | 'BINDING_THREW'
   | 'STALE_HANDLE'
+  | 'INVALID_METHOD'
+  | 'INVALID_SCHEMA'
+  | 'INVALID_EXEC_RESULT'
+  | 'UNSUPPORTED_PROTOCOL'
 
 /**
- * A failure on the discovery/CDP path, distinct from a domain-level result.
- * Follows the `RunnerDiscoveryError` convention: a typed `code` callers can
- * switch on instead of parsing English messages.
+ * A failure on the discovery/CDP/handshake path, distinct from a domain-level
+ * result. Follows the `RunnerDiscoveryError` convention: a typed `code`
+ * callers can switch on instead of parsing English messages.
  */
 export class TapTransportError extends Error {
   code: TapTransportErrorCode
@@ -30,14 +33,25 @@ export class TapTransportError extends Error {
   }
 }
 
-export interface RunTapCommandOptions extends FindRunnerOptions {
+export interface TapSessionOptions extends FindRunnerOptions {
   /** Absolute project root used to locate the running server's discovery record. */
   projectRoot: string
 }
 
-export interface TapCommandContext {
+/**
+ * One open CDP session against the runner page. `call` invokes a binding
+ * method by name and returns its JSON-decoded result, so the `getSchema`
+ * handshake and the command invocation share a single connection.
+ */
+export interface TapSession {
   record: ReadyRunnerDiscoveryRecord
+  call (method: string, args?: unknown[]): Promise<unknown>
 }
+
+// Binding method names must be plain identifiers. Callers only pass the
+// contract constants (getSchema, exec) today, but `call` is the trampoline
+// boundary — nothing else may ever reach the template in callBindingMethod.
+const METHOD_NAME_RE = /^[a-zA-Z][a-zA-Z0-9]*$/
 
 // CDP's canonical replies when a navigation discarded the execution context
 // holding our binding handle between acquiring and using it.
@@ -116,10 +130,11 @@ const resolveBindingObjectId = async (client: CRI.Client, sessionId: string): Pr
 }
 
 const callBindingMethod = (client: CRI.Client, sessionId: string, objectId: string, method: string, args: unknown[]) => {
-  // The trampoline is a fixed template over a typed method name, and
-  // `callFunctionOn` executes a function object (not a source string), so page
-  // CSP cannot block it. `arguments` + `returnByValue` + `awaitPromise` are
-  // the JSON wire boundary — CDP (de)serializes both directions.
+  // The trampoline interpolates only a METHOD_NAME_RE-validated identifier
+  // (enforced in withTapSession's `call`), and `callFunctionOn` executes a
+  // function object (not a source string), so page CSP cannot block it.
+  // `arguments` + `returnByValue` + `awaitPromise` are the JSON wire boundary —
+  // CDP (de)serializes both directions.
   return client.Runtime.callFunctionOn({
     objectId,
     functionDeclaration: `function (...a) { return this.${method}(...a) }`,
@@ -158,25 +173,23 @@ const callBindingWithRetry = async (client: CRI.Client, sessionId: string, metho
 }
 
 /**
- * Run one tap subcommand end-to-end: discover the running Cypress, open a CDP
- * connection to its browser endpoint, attach a flattened session to the runner
- * page target (matched by origin — externally what `CriClient.clone()` does for
- * in-process subsystems), invoke a `TapBindingContract` method, and hand the
- * JSON-decoded result to `handle`.
+ * Open one tap session end-to-end and hand it to `fn`: discover the running
+ * Cypress, open a CDP connection to its browser endpoint, attach a flattened
+ * session to the runner page target (matched by origin — externally what
+ * `CriClient.clone()` does for in-process subsystems), then let `fn` invoke
+ * binding methods by name via `session.call`. The schema-driven dispatch in
+ * `../exec/tap` uses one session for both the `getSchema` handshake and the
+ * command invocation.
  *
  * Transport failures throw `RunnerDiscoveryError` (rethrown untouched from
  * discovery) or `TapTransportError`; they are never folded into domain
- * results.
+ * results. A throw from the binding itself is a binding bug and surfaces as
+ * `BINDING_THREW`.
  */
-export const runTapCommand = async <
-  M extends keyof TapBindingContract,
-  R = Awaited<ReturnType<TapBindingContract[M]>>,
-> (
-  options: RunTapCommandOptions,
-  method: M,
-  args: Parameters<TapBindingContract[M]>,
-  handle: (result: R, ctx: TapCommandContext) => void,
-): Promise<void> => {
+export const withTapSession = async <T> (
+  options: TapSessionOptions,
+  fn: (session: TapSession) => Promise<T>,
+): Promise<T> => {
   const record = await findReadyRunner(options.projectRoot, { instance: options.instance })
 
   debug('found ready runner %o', { pid: record.pid, cdpBrowserWsUrl: record.cdpBrowserWsUrl })
@@ -202,19 +215,28 @@ export const runTapCommand = async <
     debug('matched runner page target %o', { targetId: target.targetId, url: target.url })
 
     const sessionId = await attachToPage(client, target.targetId)
-    const response = await callBindingWithRetry(client, sessionId, method, args)
 
-    if (response.exceptionDetails) {
-      // Binding methods return domain failures as values; a throw is a binding
-      // bug and is surfaced as a transport failure, never a domain result.
-      throw new TapTransportError(
-        'BINDING_THREW',
-        `window.${TAP_BINDING_GLOBAL}.${method} threw: ${response.exceptionDetails.exception?.description || response.exceptionDetails.text}`,
-      )
+    const call = async (method: string, args: unknown[] = []): Promise<unknown> => {
+      if (!METHOD_NAME_RE.test(method)) {
+        throw new TapTransportError('INVALID_METHOD', `"${method}" is not a valid tap binding method name.`)
+      }
+
+      const response = await callBindingWithRetry(client, sessionId, method, args)
+
+      if (response.exceptionDetails) {
+        // Binding methods return domain failures as values; a throw is a binding
+        // bug and is surfaced as a transport failure, never a domain result.
+        throw new TapTransportError(
+          'BINDING_THREW',
+          `window.${TAP_BINDING_GLOBAL}.${method} threw: ${response.exceptionDetails.exception?.description || response.exceptionDetails.text}`,
+        )
+      }
+
+      // returnByValue means result.value is already the JSON-decoded domain value.
+      return response.result.value
     }
 
-    // returnByValue means result.value is already the JSON-decoded domain value.
-    handle(response.result.value as R, { record })
+    return await fn({ record, call })
   } finally {
     // close() can reject if the socket already died; the command result stands.
     await client.close().catch(() => {})

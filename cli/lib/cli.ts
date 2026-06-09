@@ -143,7 +143,6 @@ const descriptions: any = {
   noRunnerUi: 'hides the Cypress Runner UI',
   spec: 'runs specific spec file(s). defaults to "all"',
   tag: 'named tag(s) for recorded runs in Cypress Cloud',
-  tapHealth: 'check that a running Cypress instance is reachable and its tap binding responds',
   version: 'prints Cypress version',
 }
 
@@ -601,26 +600,19 @@ const cliModule = {
 
     program
     .command('tap')
-    .usage('[command]')
+    .usage('[command] [args...]')
     .description('Interacts with a running Cypress instance')
-    .option('health', text('tapHealth'))
     .option('-P, --project <project-path>', text('project'))
     .option('--instance <pid>', text('instance'), coerceAnyStringToInt)
     .option('--json', text('json'))
     .action(async function (this: any, opts: any, args: string[]) {
-      if (!args || !args.length) {
-        this.outputHelp()
-        process.exit(1)
-      }
-
-      const [command] = args
-
-      if (!_.includes(tapModule.commands, command)) {
-        unknownOption.call(this, `tap ${command}`, 'command')
-      }
+      // Commands and their positional arguments are validated by the running
+      // instance against its own schema, not a static allowlist — the CLI
+      // forwards them as-is.
+      const [command, ...commandArgs] = args || []
 
       try {
-        const code = await tapModule.start(command, _.pick(opts, ['project', 'instance', 'json']))
+        const code = await tapModule.start(command, commandArgs, _.pick(opts, ['project', 'instance', 'json']))
 
         process.exit(code)
       } catch (e: any) {

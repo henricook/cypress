@@ -210,20 +210,13 @@ describe('cli', () => {
       expect(result).toMatchSnapshot()
     })
 
+    // NOTE: sub-commands and their positional arguments are validated by the
+    // running instance against its own schema, so they always reach tapModule
+    // (covered by the mocked `cypress tap` block below and
+    // test/lib/exec/tap.spec.ts) — only unknown options are rejected by the
+    // CLI itself.
     it('shows help for tap command - unknown option --foo', async () => {
       const result = await execa('bin/cypress', ['tap', '--foo'])
-
-      expect(result).toMatchSnapshot()
-    })
-
-    it('shows help for tap command - unknown sub-command foo', async () => {
-      const result = await execa('bin/cypress', ['tap', 'foo'])
-
-      expect(result).toMatchSnapshot()
-    })
-
-    it('shows help for tap command - no sub-command', async () => {
-      const result = await execa('bin/cypress', ['tap'])
 
       expect(result).toMatchSnapshot()
     })
@@ -852,7 +845,26 @@ describe('cli', () => {
 
       await flushPromises()
 
-      expect(tap.start).toBeCalledWith('health', {})
+      expect(tap.start).toBeCalledWith('health', [], {})
+      expect(processExitSpy).toHaveBeenCalledWith(1)
+    })
+
+    it('forwards positional arguments after the sub-command', async () => {
+      await exec('tap run cypress/e2e/spec.cy.js')
+
+      await flushPromises()
+
+      expect(tap.start).toBeCalledWith('run', ['cypress/e2e/spec.cy.js'], {})
+    })
+
+    it('calls tap.start with no command for the live command listing', async () => {
+      vi.mocked(tap.start).mockResolvedValue(1)
+
+      await exec('tap')
+
+      await flushPromises()
+
+      expect(tap.start).toBeCalledWith(undefined, [], {})
       expect(processExitSpy).toHaveBeenCalledWith(1)
     })
 
@@ -861,7 +873,7 @@ describe('cli', () => {
 
       await flushPromises()
 
-      expect(tap.start).toBeCalledWith('health', {
+      expect(tap.start).toBeCalledWith('health', [], {
         project: 'foo/bar',
         instance: 123,
         json: true,
