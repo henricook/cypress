@@ -15,6 +15,7 @@ import { start } from './tasks/verify'
 import installModule from './tasks/install'
 import versionModule from './exec/versions'
 import infoModule from './exec/info'
+import tapModule from './exec/tap'
 
 const debug = Debug('cypress:cli:cli')
 
@@ -126,6 +127,8 @@ const descriptions: any = {
   headless: 'hide the browser instead of running headed (default for cypress run)',
   inspect: 'enable the Node.js inspector to debug the Cypress development process. only available when used with --dev',
   inspectBrk: 'enable the Node.js inspector and break before the Cypress development process starts. only available when used with --dev',
+  instance: 'target a specific running Cypress instance by its server process id (pid)',
+  json: 'print the result as a single JSON object',
   key: 'your secret Record Key. you can omit this if you set a CYPRESS_RECORD_KEY environment variable.',
   parallel: 'enables concurrent runs and automatic load balancing of specs across multiple machines or processes',
   passWithNoTests: 'pass when no tests are found',
@@ -140,6 +143,7 @@ const descriptions: any = {
   noRunnerUi: 'hides the Cypress Runner UI',
   spec: 'runs specific spec file(s). defaults to "all"',
   tag: 'named tag(s) for recorded runs in Cypress Cloud',
+  tapHealth: 'check that a running Cypress instance is reachable and its tap binding responds',
   version: 'prints Cypress version',
 }
 
@@ -151,6 +155,7 @@ const knownCommands = [
   'install',
   'open',
   'run',
+  'tap',
   'verify',
   '-v',
   '--version',
@@ -592,6 +597,35 @@ const cliModule = {
       }
 
       cache[command]()
+    })
+
+    program
+    .command('tap')
+    .usage('[command]')
+    .description('Interacts with a running Cypress instance')
+    .option('health', text('tapHealth'))
+    .option('-P, --project <project-path>', text('project'))
+    .option('--instance <pid>', text('instance'), coerceAnyStringToInt)
+    .option('--json', text('json'))
+    .action(async function (this: any, opts: any, args: string[]) {
+      if (!args || !args.length) {
+        this.outputHelp()
+        process.exit(1)
+      }
+
+      const [command] = args
+
+      if (!_.includes(tapModule.commands, command)) {
+        unknownOption.call(this, `tap ${command}`, 'command')
+      }
+
+      try {
+        const code = await tapModule.start(command, _.pick(opts, ['project', 'instance', 'json']))
+
+        process.exit(code)
+      } catch (e: any) {
+        util.logErrorExit1(e)
+      }
     })
 
     maybeAddDevFlag(program

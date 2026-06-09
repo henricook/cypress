@@ -8,6 +8,7 @@ import logger from '../../lib/logger'
 import info from '../../lib/exec/info'
 import run from '../../lib/exec/run'
 import open from '../../lib/exec/open'
+import tap from '../../lib/exec/tap'
 import cache from '../../lib/tasks/cache'
 import state from '../../lib/tasks/state'
 import { start as verifyStart } from '../../lib/tasks/verify'
@@ -66,6 +67,18 @@ vi.mock('../../lib/exec/open', async (importActual) => {
 })
 
 vi.mock('../../lib/exec/info', async (importActual) => {
+  const actual = await importActual()
+
+  return {
+    default: {
+      // @ts-expect-error
+      ...actual.default,
+      start: vi.fn(),
+    },
+  }
+})
+
+vi.mock('../../lib/exec/tap', async (importActual) => {
   const actual = await importActual()
 
   return {
@@ -193,6 +206,24 @@ describe('cli', () => {
 
     it('shows help for cache command - no sub-command', async () => {
       const result = await execa('bin/cypress', ['cache'])
+
+      expect(result).toMatchSnapshot()
+    })
+
+    it('shows help for tap command - unknown option --foo', async () => {
+      const result = await execa('bin/cypress', ['tap', '--foo'])
+
+      expect(result).toMatchSnapshot()
+    })
+
+    it('shows help for tap command - unknown sub-command foo', async () => {
+      const result = await execa('bin/cypress', ['tap', 'foo'])
+
+      expect(result).toMatchSnapshot()
+    })
+
+    it('shows help for tap command - no sub-command', async () => {
+      const result = await execa('bin/cypress', ['tap'])
 
       expect(result).toMatchSnapshot()
     })
@@ -802,6 +833,47 @@ describe('cli', () => {
       vi.mocked(cache.list).mockRejectedValue(err)
 
       await exec('cache list')
+
+      await flushPromises()
+
+      expect(util.logErrorExit1).toHaveBeenCalledWith(err)
+    })
+  })
+
+  describe('cypress tap', () => {
+    beforeEach(() => {
+      vi.mocked(tap.start).mockResolvedValue(0)
+    })
+
+    it('calls tap.start with the sub-command and exits with its code', async () => {
+      vi.mocked(tap.start).mockResolvedValue(1)
+
+      await exec('tap health')
+
+      await flushPromises()
+
+      expect(tap.start).toBeCalledWith('health', {})
+      expect(processExitSpy).toHaveBeenCalledWith(1)
+    })
+
+    it('forwards --project, --instance and --json', async () => {
+      await exec('tap health --project foo/bar --instance 123 --json')
+
+      await flushPromises()
+
+      expect(tap.start).toBeCalledWith('health', {
+        project: 'foo/bar',
+        instance: 123,
+        json: true,
+      })
+    })
+
+    it('catches rejection and exits', async () => {
+      const err = new Error('tap health failed badly')
+
+      vi.mocked(tap.start).mockRejectedValue(err)
+
+      await exec('tap health')
 
       await flushPromises()
 
