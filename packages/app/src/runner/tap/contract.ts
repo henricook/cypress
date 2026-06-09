@@ -51,6 +51,12 @@ export interface TapSchema {
 
 export type TapExecFailureCode = 'UNKNOWN_COMMAND' | 'INVALID_ARGUMENTS'
 
+export interface SpecListEntry {
+  /** Project-relative spec path — the form `cypress run --spec` accepts. */
+  relative: string
+  specType: 'integration' | 'component'
+}
+
 /**
  * The wire envelope `exec` resolves with. `ok: false` covers dispatch-level
  * failures only — an unrecognized command name or positionals that do not
