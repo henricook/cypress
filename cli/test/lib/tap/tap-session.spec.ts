@@ -62,12 +62,8 @@ const makeRecord = (overrides: Partial<ReadyRunnerDiscoveryRecord> = {}): ReadyR
     pid: 1234,
     cypressVersion: '15.0.0',
     projectRoot: PROJECT,
-    runnerOrigin: RUNNER_ORIGIN,
     cdpStatus: 'ready',
-    cdpHost: '127.0.0.1',
-    cdpPort: 9999,
     cdpBrowserWsUrl: BROWSER_WS_URL,
-    createdAt: 1700000000000,
     ...overrides,
   }
 }

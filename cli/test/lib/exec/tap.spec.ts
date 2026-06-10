@@ -21,12 +21,8 @@ const record = {
   pid: 1234,
   cypressVersion: '15.0.0',
   projectRoot: '/projects/app',
-  runnerOrigin: 'http://localhost:5555',
   cdpStatus: 'ready' as const,
-  cdpHost: '127.0.0.1',
-  cdpPort: 9222,
   cdpBrowserWsUrl: 'ws://127.0.0.1:9222/devtools/browser/abc',
-  createdAt: 1700000000000,
 }
 
 const schema: TapSchema = {
