@@ -58,6 +58,15 @@ export interface SpecListEntry {
 }
 
 /**
+ * Result of the `run` command. Triggering is fire-and-forget: `started`
+ * means navigation was issued, not that the spec finished or passed.
+ */
+export type RunResult =
+  | { status: 'started', spec: SpecListEntry }
+  | { status: 'invalidSpec', message: string }
+  | { status: 'specNotFound', spec: string, message: string }
+
+/**
  * The wire envelope `exec` resolves with. `ok: false` covers dispatch-level
  * failures only — an unrecognized command name or positionals that do not
  * satisfy the command's param schema. Domain failures (a command that ran

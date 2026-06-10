@@ -1,6 +1,7 @@
 import type { FoundSpec } from '@packages/types'
 
-import type { HealthResult, SpecListEntry, TapCommandParamSchema } from './contract'
+import { posixify } from '../../paths'
+import type { HealthResult, RunResult, SpecListEntry, TapCommandParamSchema } from './contract'
 
 /**
  * One `cypress tap` subcommand: the metadata `getSchema()` advertises to the
@@ -12,6 +13,23 @@ export interface TapCommandDefinition {
   description: string
   params: TapCommandParamSchema[]
   handler: (...args: any[]) => Promise<unknown>
+}
+
+// Distinguishes each `run` invocation in the runner URL so rerunning the
+// already-active spec still produces a query change (see the `run` handler).
+let tapRunNonce = 0
+
+/**
+ * Seam over the one side effect `run` performs. Component tests stub this —
+ * really navigating there moves the spec frame and stops the test
+ * mid-command. The hash setter (rather than `location.href = '#…'`) is what
+ * guarantees a synchronous same-document fragment navigation, including when
+ * the runner page is itself an AUT (the cypress-in-cypress harness).
+ */
+export const tapNavigation = {
+  setHash (hash: string) {
+    window.location.hash = hash
+  },
 }
 
 /**
@@ -37,6 +55,37 @@ export const tapCommands = {
       const specs = (window.__RUN_MODE_SPECS__ ?? []) as FoundSpec[]
 
       return specs.map(({ relative, specType }) => ({ relative, specType }))
+    },
+  },
+  run: {
+    description: 'run (or rerun) a spec by its project-relative path',
+    params: [
+      { name: 'spec', type: 'string', required: true, description: 'project-relative spec path, as listed by the spec command' },
+    ],
+    handler: async (spec: string): Promise<RunResult> => {
+      if (typeof spec !== 'string' || spec.length === 0) {
+        return { status: 'invalidSpec', message: 'spec must be a non-empty string (a project-relative spec path)' }
+      }
+
+      const specs = (window.__RUN_MODE_SPECS__ ?? []) as FoundSpec[]
+      const wanted = posixify(spec)
+      const match = specs.find((entry) => posixify(entry.relative) === wanted)
+
+      if (!match) {
+        return { status: 'specNotFound', spec, message: 'no spec matches that path — use the spec command to list runnable specs' }
+      }
+
+      // The tapRun nonce makes route.query differ from the previous query, so
+      // the unifiedRunner watchSpecs effect always kicks off a fresh run —
+      // even when this spec is already active (rerun). Hash navigation never
+      // reloads the page, so this promise still resolves over CDP. The path
+      // travels in posix form because watchSpecs converts route.query.file
+      // back via getPathForPlatform.
+      const file = encodeURIComponent(posixify(match.relative)).replace(/%2F/g, '/')
+
+      tapNavigation.setHash(`/specs/runner?file=${file}&tapRun=${++tapRunNonce}`)
+
+      return { status: 'started', spec: { relative: match.relative, specType: match.specType } }
     },
   },
 } satisfies Record<string, TapCommandDefinition>
