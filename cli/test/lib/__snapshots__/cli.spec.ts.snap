@@ -578,7 +578,7 @@ exports[`cli > unknown option > shows help for tap command - unknown option --fo
   -------
   error: unknown option: --foo
 
-  Usage: cypress tap [command]
+  Usage: cypress tap [command] [args...]
 
   Interacts with a running Cypress instance
 
