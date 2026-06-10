@@ -14,7 +14,9 @@
  *   CLI version can drive any Cypress version.
  *
  * The command registry in `./commands` is the single source of truth: the
- * schema and the dispatch are both derived from it.
+ * schema and the dispatch are both derived from it. Per-command result
+ * shapes are NOT part of this frozen surface — they live with their command
+ * in `./commands/<name>.ts` and reach the CLI as opaque JSON.
  *
  * Every value MUST round-trip through JSON cleanly: CDP
  * `Runtime.callFunctionOn` with `returnByValue: true` + `awaitPromise: true`
@@ -51,21 +53,6 @@ export interface TapSchema {
 
 export type TapExecFailureCode = 'UNKNOWN_COMMAND' | 'INVALID_ARGUMENTS'
 
-export interface SpecListEntry {
-  /** Project-relative spec path — the form `cypress run --spec` accepts. */
-  relative: string
-  specType: 'integration' | 'component'
-}
-
-/**
- * Result of the `run` command. Triggering is fire-and-forget: `started`
- * means navigation was issued, not that the spec finished or passed.
- */
-export type RunResult =
-  | { status: 'started', spec: SpecListEntry }
-  | { status: 'invalidSpec', message: string }
-  | { status: 'specNotFound', spec: string, message: string }
-
 /**
  * The wire envelope `exec` resolves with. `ok: false` covers dispatch-level
  * failures only — an unrecognized command name or positionals that do not
@@ -76,8 +63,6 @@ export type RunResult =
 export type TapExecResult =
   | { ok: true, result: unknown }
   | { ok: false, code: TapExecFailureCode, message: string }
-
-export type HealthResult = 'ok'
 
 /** The full callable surface of the binding. */
 export interface TapBindingContract {

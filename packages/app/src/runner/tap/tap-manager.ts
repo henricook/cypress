@@ -1,5 +1,5 @@
 import { tapCommands } from './commands'
-import type { TapCommandDefinition } from './commands'
+import type { TapCommandDefinition } from './commands/definition'
 import { coerceCommandArgs } from './exec-args'
 import { TAP_PROTOCOL_VERSION } from './contract'
 import type { TapBindingContract, TapExecResult, TapSchema } from './contract'
