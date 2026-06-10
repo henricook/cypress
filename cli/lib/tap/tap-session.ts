@@ -9,7 +9,6 @@ const debug = Debug('cypress:cli:tap')
 
 export type TapTransportErrorCode =
   | 'CDP_UNREACHABLE'
-  | 'RUNNER_PAGE_NOT_FOUND'
   | 'BINDING_NOT_FOUND'
   | 'BINDING_THREW'
   | 'STALE_HANDLE'
@@ -63,12 +62,12 @@ const isStaleHandleError = (err: unknown): boolean => {
   return err instanceof Error && STALE_OBJECT_RE.test(err.message)
 }
 
-// Structural subset of CDP `Target.TargetInfo` — enough to pick the runner page
-// without coupling to the full `devtools-protocol` type surface.
-const isRunnerPageTarget = (target: { type: string, url: string }, runnerOrigin: string): boolean => {
-  return target.type === 'page' &&
-    typeof target.url === 'string' &&
-    target.url.startsWith(runnerOrigin)
+// Structural subset of CDP `Target.TargetInfo` — enough to enumerate candidate
+// pages without coupling to the full `devtools-protocol` type surface.
+interface PageTargetInfo {
+  targetId: string
+  type: string
+  url: string
 }
 
 // Passing a `ws://` URL makes CRI connect straight to it with no HTTP /json
@@ -107,6 +106,51 @@ const attachToPage = async (client: CRI.Client, targetId: string): Promise<strin
       { cause: err },
     )
   }
+}
+
+// True when the page behind `sessionId` has the tap binding mounted. Any
+// evaluation hiccup (mid-navigation, page closing) just means "not this one".
+const probeForBinding = async (client: CRI.Client, sessionId: string): Promise<boolean> => {
+  // A constant expression — nothing is ever interpolated or escaped.
+  const { result, exceptionDetails } = await client.Runtime.evaluate({
+    expression: `window.${TAP_BINDING_GLOBAL}`,
+  }, sessionId)
+
+  return !exceptionDetails && result.type !== 'undefined' && !!result.objectId
+}
+
+// The runner page is found by probing every page target for the binding
+// global, not by URL: the first cross-origin cy.visit of a test re-serves the
+// runner under the AUT's origin (the proxy answers /__/ on any origin), so any
+// origin recorded at discovery time goes stale after the first run.
+const findRunnerPageSession = async (client: CRI.Client, targetInfos: PageTargetInfo[]): Promise<string> => {
+  for (const target of targetInfos) {
+    if (target.type !== 'page') {
+      continue
+    }
+
+    try {
+      const sessionId = await attachToPage(client, target.targetId)
+
+      if (await probeForBinding(client, sessionId)) {
+        debug('matched runner page target %o', { targetId: target.targetId, url: target.url })
+
+        return sessionId
+      }
+
+      // Not the runner — drop the session rather than holding one open on an
+      // unrelated page for the rest of the command.
+      await client.Target.detachFromTarget({ sessionId }).catch(() => {})
+    } catch (err: any) {
+      // A candidate page can close or navigate mid-probe; keep looking.
+      debug('probing target %s failed: %s', target.targetId, err.message)
+    }
+  }
+
+  throw new TapTransportError(
+    'BINDING_NOT_FOUND',
+    `Connected to the browser, but no page has window.${TAP_BINDING_GLOBAL} mounted. The runner may still be loading (try again), the runner tab may have been closed, or the running Cypress version may not support \`cypress tap\`.`,
+  )
 }
 
 const resolveBindingObjectId = async (client: CRI.Client, sessionId: string): Promise<string> => {
@@ -175,11 +219,10 @@ const callBindingWithRetry = async (client: CRI.Client, sessionId: string, metho
 /**
  * Open one tap session end-to-end and hand it to `fn`: discover the running
  * Cypress, open a CDP connection to its browser endpoint, attach a flattened
- * session to the runner page target (matched by origin — externally what
- * `CriClient.clone()` does for in-process subsystems), then let `fn` invoke
- * binding methods by name via `session.call`. The schema-driven dispatch in
- * `../exec/tap` uses one session for both the `getSchema` handshake and the
- * command invocation.
+ * session to the runner page (found by probing page targets for the binding
+ * global), then let `fn` invoke binding methods by name via `session.call`.
+ * The schema-driven dispatch in `../exec/tap` uses one session for both the
+ * `getSchema` handshake and the command invocation.
  *
  * Transport failures throw `RunnerDiscoveryError` (rethrown untouched from
  * discovery) or `TapTransportError`; they are never folded into domain
@@ -199,22 +242,7 @@ export const withTapSession = async <T> (
   try {
     const { targetInfos } = await listTargets(client)
 
-    // The runner page is matched by origin — the record carries no targetId, so
-    // the match survives tab re-clones.
-    // TODO: if two runner tabs against one origin ever prove ambiguous, probe
-    // each candidate for the binding instead of taking the first.
-    const target = targetInfos.find((candidate) => isRunnerPageTarget(candidate, record.runnerOrigin))
-
-    if (!target) {
-      throw new TapTransportError(
-        'RUNNER_PAGE_NOT_FOUND',
-        `Connected to the browser, but found no Cypress runner page at ${record.runnerOrigin}. If the runner tab was closed, reopen it and try again.`,
-      )
-    }
-
-    debug('matched runner page target %o', { targetId: target.targetId, url: target.url })
-
-    const sessionId = await attachToPage(client, target.targetId)
+    const sessionId = await findRunnerPageSession(client, targetInfos)
 
     const call = async (method: string, args: unknown[] = []): Promise<unknown> => {
       if (!METHOD_NAME_RE.test(method)) {
