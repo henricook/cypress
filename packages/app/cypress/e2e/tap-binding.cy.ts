@@ -18,11 +18,17 @@ describe('tap binding', () => {
       const schema = await binding.getSchema()
 
       expect(schema.protocolVersion).to.eq(1)
-      expect(schema.commands.map((command) => command.name)).to.include.members(['health', 'spec'])
+      expect(schema.commands.map((command) => command.name)).to.include.members(['health', 'spec', 'tests'])
 
       const unknown = await binding.exec('not-a-command')
 
       expect(unknown).to.deep.include({ ok: false, code: 'UNKNOWN_COMMAND' })
+
+      // No spec has run yet, so the runner window has no Cypress instance to read.
+      const testsBeforeRun = await binding.exec('tests')
+
+      expect(testsBeforeRun.ok).to.eq(true)
+      expect((testsBeforeRun as { result: object }).result).to.deep.include({ status: 'noRun' })
 
       const outcome = await binding.exec('spec')
 
@@ -74,6 +80,25 @@ describe('tap binding', () => {
 
     cy.waitForSpecToFinish({ passCount: 1 })
     cy.contains('Dom Content').should('be.visible')
+
+    // With a run finished, the tests command reads the runner's tests state.
+    cy.window().then(async (win) => {
+      const outcome = await getBinding(win).exec('tests')
+
+      expect(outcome.ok).to.eq(true)
+
+      const result = (outcome as { ok: true, result: { status: string, tests: Array<Record<string, unknown>> } }).result
+
+      expect(result.status).to.eq('collected')
+      expect(result.tests).to.have.length.greaterThan(0)
+
+      for (const test of result.tests) {
+        expect(Object.keys(test), `entry ${test.id}`).to.deep.eq(['id', 'title', 'duration', 'state', 'retries'])
+        expect(test.state).to.eq('passed')
+        expect(test.duration).to.be.a('number')
+        expect(test.retries).to.eq(0)
+      }
+    })
 
     // Rerunning the same spec advances the tapRun nonce, so the query change
     // kicks off a fresh run even though the active spec is unchanged.

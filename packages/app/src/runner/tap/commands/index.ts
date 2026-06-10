@@ -2,6 +2,7 @@ import type { TapCommandDefinition } from './definition'
 import { healthCommand } from './health'
 import { runCommand } from './run'
 import { specCommand } from './spec'
+import { testsCommand } from './tests'
 
 /**
  * The command registry — the single source of truth for the tap binding.
@@ -13,4 +14,5 @@ export const tapCommands = {
   health: healthCommand,
   spec: specCommand,
   run: runCommand,
+  tests: testsCommand,
 } satisfies Record<string, TapCommandDefinition>
