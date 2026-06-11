@@ -241,7 +241,7 @@ commands:
     parameters:
       executor:
         type: executor
-        default: cy-doc
+        default: cy-docker
       windows_skip_git_checkout:
         description: >-
           Windows only. When true, expect ~/cypress from attach_workspace (skip git checkout).
@@ -313,7 +313,7 @@ commands:
     parameters:
       executor:
         type: executor
-        default: cy-doc
+        default: cy-docker
     steps:
       - run:
           name: Build packages
@@ -770,7 +770,7 @@ commands:
       executor:
         description: executor in use (for restore_cached_workspace)
         type: executor
-        default: cy-doc
+        default: cy-docker
 
     steps:
       - halt-if-skipped:
@@ -984,7 +984,7 @@ commands:
       executor:
         description: executor in use (for restore_cached_workspace)
         type: executor
-        default: cy-doc
+        default: cy-docker
       bun-release:
         description: pinned Bun release tag passed to https://bun.sh/install (e.g.
           bun-v1.2.22)
@@ -1063,7 +1063,7 @@ commands:
       executor:
         description: executor in use (for restore_cached_workspace)
         type: executor
-        default: cy-doc
+        default: cy-docker
     steps:
       - restore_cached_workspace:
           executor: << parameters.executor >>
@@ -2190,7 +2190,7 @@ jobs:
     steps:
       - maybe_skip_binary_jobs
       - run-binary-system-tests:
-          executor: cy-doc
+          executor: cy-docker
   yarn-pnp-preprocessor-system-test:
     parallelism: 1
     working_directory: ~/cypress
