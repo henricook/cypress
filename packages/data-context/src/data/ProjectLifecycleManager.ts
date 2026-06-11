@@ -167,6 +167,11 @@ export class ProjectLifecycleManager {
     this._projectRoot = undefined
   }
 
+  /**
+   * Lockfile precedence when multiple files exist: `package-lock.json` wins, then `yarn.lock`,
+   * then `pnpm-lock.yaml`, then Bun (`bun.lock` / `bun.lockb`). Projects should ship only one
+   * package-manager lockfile; mixed lockfiles are ambiguous and may not reflect the tool in use.
+   */
   private getPackageManagerUsed (projectRoot: string) {
     if (fs.existsSync(path.join(projectRoot, 'package-lock.json'))) {
       return 'npm'
@@ -178,6 +183,13 @@ export class ProjectLifecycleManager {
 
     if (fs.existsSync(path.join(projectRoot, 'pnpm-lock.yaml'))) {
       return 'pnpm'
+    }
+
+    if (
+      fs.existsSync(path.join(projectRoot, 'bun.lock')) ||
+      fs.existsSync(path.join(projectRoot, 'bun.lockb'))
+    ) {
+      return 'bun'
     }
 
     return 'npm'
@@ -199,6 +211,12 @@ export class ProjectLifecycleManager {
         this.ctx.emitter.toApp()
       },
       onFinalConfigLoaded: async (finalConfig: FullConfig, options: OnFinalConfigLoadedOptions) => {
+        // if we no longer have a project, just return
+        // can happen when the user clears the project while setupNodeEvents is in flight
+        if (!this._projectRoot) {
+          return
+        }
+
         if (this._currentTestingType && finalConfig.specPattern) {
           await this.ctx.actions.project.setSpecsFoundBySpecPattern({
             projectRoot: this.projectRoot,
@@ -288,6 +306,12 @@ export class ProjectLifecycleManager {
    *  4. The first browser found.
    */
   async setInitialActiveBrowser () {
+    // if we no longer have a project, just return
+    // can happen when the user clears the project while we are setting up
+    if (!this._projectRoot) {
+      return
+    }
+
     const configDefaultBrowser = this.loadedFullConfig?.defaultBrowser
 
     // if we have a default browser from the config and a CLI browser wasn't passed and the active browser hasn't been set
